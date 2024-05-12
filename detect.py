@@ -1,6 +1,5 @@
-# YOLOv5 🚀 by Ultralytics, AGPL-3.0 license
 """
-
+python detect.py --source san_meuseum.mp4 --weights yolov5s.pt --conf-thres 0.5 --iou-thres 0.45 --max-det 1 --view-img --classes 0 --device 0
 python detect.py --weights yolov5s.pt --source 'https://www.youtube.com/watch?v=yNsIh0ciYiI' --classes 0
 
 Usage - sources:
@@ -28,15 +27,26 @@ Usage - formats:
                                  yolov5s_edgetpu.tflite     # TensorFlow Edge TPU
                                  yolov5s_paddle_model       # PaddlePaddle
 """
-
+#Object coordinates (x_min, y_min, x_max, y_max): (448, 603, 597, 795) left_obj
+#Object coordinates (x_min, y_min, x_max, y_max): (1294, 580, 1482, 804) right_obj
 import argparse
 import csv
 import os
 import platform
 import sys
 from pathlib import Path
-
+import time
 import torch
+import cv2
+import pygame
+import time
+
+# Initialize pygame audio
+pygame.mixer.init()
+
+#obj coordinates
+left_obj_coords = (251, 202, 294, 351)
+right_obj_coords = (525, 192, 561, 342)
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -45,7 +55,6 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from ultralytics.utils.plotting import Annotator, colors, save_one_box
-
 from models.common import DetectMultiBackend
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from utils.general import (
@@ -56,7 +65,6 @@ from utils.general import (
     check_imshow,
     check_requirements,
     colorstr,
-    cv2,
     increment_path,
     non_max_suppression,
     print_args,
@@ -66,6 +74,54 @@ from utils.general import (
 )
 from utils.torch_utils import select_device, smart_inference_mode
 
+is_within_threshold = False
+last_within_threshold_time = 0
+last_outside_threshold_time = 0
+
+def update_proximity_flag(offset_x, offset_y, threshold_distance):
+    global is_within_threshold
+    is_within_threshold = abs(offset_x) <= threshold_distance and abs(offset_y) <= threshold_distance
+
+def is_near_object(center_x, center_y, obj_coords_left, obj_coords_right, threshold_distance):
+    obj_center_x_left = (obj_coords_left[0] + obj_coords_left[2]) / 2
+    obj_center_y_left = (obj_coords_left[1] + obj_coords_left[3]) / 2
+    obj_center_x_right = (obj_coords_right[0] + obj_coords_right[2]) / 2
+    obj_center_y_right = (obj_coords_right[1] + obj_coords_right[3]) / 2
+    
+    distance_left = ((center_x - obj_center_x_left) ** 2 + (center_y - obj_center_y_left) ** 2) ** 0.5
+    distance_right = ((center_x - obj_center_x_right) ** 2 + (center_y - obj_center_y_right) ** 2) ** 0.5
+    
+    if distance_left <= threshold_distance:
+        return "left"
+    elif distance_right <= threshold_distance:
+        return "right"
+    else:
+        return None
+
+
+is_playing = False
+
+def control_audio_playback(is_within_threshold, alert_sound):
+    global last_within_threshold_time, last_outside_threshold_time, is_playing
+
+    current_time = time.time()
+
+    if is_within_threshold:
+        if not is_playing and current_time - last_within_threshold_time >= 2:
+            pygame.mixer.music.load(alert_sound)
+            pygame.mixer.music.play()
+            is_playing = True
+            print('play')  # Resume audio playback
+        last_within_threshold_time = current_time
+        last_outside_threshold_time = 0
+    else:
+        last_outside_threshold_time = current_time
+
+    # Pause playback if outside threshold for more than 2 seconds
+    if is_playing and current_time - last_within_threshold_time > 2:
+        pygame.mixer.music.pause()
+        is_playing = False
+        print('pause')
 
 @smart_inference_mode()
 def run(
@@ -206,6 +262,7 @@ def run(
                 for *xyxy, conf, cls in reversed(det):
                     if int(cls) == 0:  # Check for class 0 (human)
                         x_min, y_min, x_max, y_max = xyxy  # Extract coordinates
+                        print("coords:",x_min, y_min, x_max, y_max)
                         human_detections.append((x_min, y_min, x_max, y_max))
                     c = int(cls)  # integer class
                     label = names[c] if hide_conf else f"{names[c]}"
@@ -227,12 +284,23 @@ def run(
                         annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
-                # Inside the loop for each frame
+                        # Inside the loop for each frame
                     if human_detections:
-                        print(f"Frame {i} - Human Detections:")
                         for box in human_detections:
                             x_min, y_min, x_max, y_max = box
-                            print(f"\t- (x_min: {x_min}, y_min: {y_min}), (x_max: {x_max}, y_max: {y_max})")
+                            center_x = (x_min + x_max) / 2
+                            center_y = (y_min + y_max) / 2
+                            threshold_distance = 20
+                            
+                            # Check if the person's coordinates are near either of the specified coordinates
+                            near_object = is_near_object(center_x, center_y, left_obj_coords, right_obj_coords, threshold_distance)
+                            
+                            if near_object == "left":
+                                control_audio_playback(True, "sound1.wav")
+                            elif near_object == "right":
+                                control_audio_playback(True, "sound2.wav")
+                            else:
+                                control_audio_playback(False, "")
 
 
             # Stream results
@@ -280,21 +348,19 @@ def run(
 def parse_opt():
     """Parses command-line arguments for YOLOv5 detection, setting inference options and model configurations."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weights", nargs="+", type=str, default=ROOT / "yolov5s.pt", help="model path or triton URL")
-    parser.add_argument("--source", type=str, default=ROOT / "data/images", help="file/dir/URL/glob/screen/0(webcam)")
-    parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="(optional) dataset.yaml path")
-    parser.add_argument("--imgsz", "--img", "--img-size", nargs="+", type=int, default=[640], help="inference size h,w")
+    parser.add_argument("--weights", nargs="+", type=str, default=ROOT / "yolov5s.pt", help="model.pt path(s)")
+    parser.add_argument("--source", type=str, default=ROOT / "data/images", help="file/dir/URL/glob, 0 for webcam")
+    parser.add_argument("--imgsz", "--img", nargs="+", type=int, default=[640, 640], help="inference size (pixels)")
     parser.add_argument("--conf-thres", type=float, default=0.25, help="confidence threshold")
     parser.add_argument("--iou-thres", type=float, default=0.45, help="NMS IoU threshold")
     parser.add_argument("--max-det", type=int, default=1000, help="maximum detections per image")
     parser.add_argument("--device", default="", help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
-    parser.add_argument("--view-img", action="store_true", help="show results")
+    parser.add_argument("--view-img", action="store_true", help="display results")
     parser.add_argument("--save-txt", action="store_true", help="save results to *.txt")
-    parser.add_argument("--save-csv", action="store_true", help="save results in CSV format")
     parser.add_argument("--save-conf", action="store_true", help="save confidences in --save-txt labels")
     parser.add_argument("--save-crop", action="store_true", help="save cropped prediction boxes")
     parser.add_argument("--nosave", action="store_true", help="do not save images/videos")
-    parser.add_argument("--classes", nargs="+", type=int, help="filter by class: --classes 0, or --classes 0 2 3")
+    parser.add_argument("--classes", nargs="+", type=int, help="filter by class")
     parser.add_argument("--agnostic-nms", action="store_true", help="class-agnostic NMS")
     parser.add_argument("--augment", action="store_true", help="augmented inference")
     parser.add_argument("--visualize", action="store_true", help="visualize features")
@@ -303,24 +369,17 @@ def parse_opt():
     parser.add_argument("--name", default="exp", help="save results to project/name")
     parser.add_argument("--exist-ok", action="store_true", help="existing project/name ok, do not increment")
     parser.add_argument("--line-thickness", default=3, type=int, help="bounding box thickness (pixels)")
-    parser.add_argument("--hide-labels", default=False, action="store_true", help="hide labels")
-    parser.add_argument("--hide-conf", default=False, action="store_true", help="hide confidences")
+    parser.add_argument("--hide-labels", action="store_true", help="hide labels")
+    parser.add_argument("--hide-conf", action="store_true", help="hide confidences")
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
-    parser.add_argument("--vid-stride", type=int, default=1, help="video frame-rate stride")
+    parser.add_argument("--vid-stride", default=1, type=int, help="video frames to skip (0 = auto)")
     opt = parser.parse_args()
-    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
-    print_args(vars(opt))
+    print_args(opt)
     return opt
 
 
-def main(opt):
-    """Executes YOLOv5 model inference with given options, checking requirements before running the model."""
-    check_requirements(ROOT / "requirements.txt", exclude=("tensorboard", "thop"))
-    run(**vars(opt))
-
-
 if __name__ == "__main__":
-    opt = parse_opt()
-    main(opt)
-
+    check_requirements(exclude=("pycocotools", "thop"))  # check ONNX module requirements
+    opt = parse_opt()  # Parse command line arguments
+    run(**vars(opt))  # Run inference
